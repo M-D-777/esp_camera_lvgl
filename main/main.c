@@ -29,6 +29,8 @@
 
 #include "lvgl_helpers.h"
 
+#include "app_camera_esp.h"
+
 /*********************
  *      DEFINES
  *********************/
@@ -42,11 +44,30 @@
  **********************/
 static void lv_tick_task(void *arg);
 static void guiTask(void *pvParameter);
+static void app_task(void *pvParameter);
+
+camera_fb_t *fb = NULL;
+uint8_t *dis_buf = NULL;
+static lv_obj_t *img_cam;
+
+static const uint8_t width = 160;
+static const uint8_t height = 120;
+
+lv_img_dsc_t img_dsc = {
+    .header.always_zero = 0,
+    .header.w = width,
+    .header.h = height,
+    .data_size = width * height * 2,
+    .header.cf = LV_IMG_CF_TRUE_COLOR,
+    .data = NULL,
+};
 
 /**********************
  *   APPLICATION MAIN
  **********************/
 void app_main() {
+
+    app_camera_init();
 
     /* If you want to use a task to create the graphic, you NEED to create a Pinned task
      * Otherwise there can be problem such as memory corruption and so on.
@@ -142,9 +163,7 @@ static void guiTask(void *pvParameter) {
     ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, LV_TICK_PERIOD_MS * 1000));
 
-    lv_obj_t *label = lv_label_create(lv_scr_act());         // full screen as the parent
-    lv_label_set_text(label, "Hello lvgl");   // set label text
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0); // Center but 20 from the top
+    xTaskCreatePinnedToCore(app_task, "app", 4096*8, NULL, 0, NULL, 1);
 
     while (1) {
         /* Delay 1 tick (assumes FreeRTOS tick is 10ms */
@@ -169,4 +188,48 @@ static void lv_tick_task(void *arg) {
     (void) arg;
 
     lv_tick_inc(LV_TICK_PERIOD_MS);
+}
+
+static void app_task(void *pvParameter) {
+    (void) pvParameter;
+
+    img_cam = lv_img_create(lv_scr_act());
+    lv_obj_align(img_cam, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_size(img_cam, width, height);
+    //lv_img_set_angle(img_cam, 900);
+
+    lv_obj_t *label = lv_label_create(lv_scr_act());
+    lv_label_set_text(label, "ESP camera lvgl");
+    lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -50);
+
+    while (1)
+    {
+        static int64_t last_frame = 0;
+        if (!last_frame)
+        {
+            last_frame = esp_timer_get_time();
+        }
+        fb = esp_camera_fb_get();
+        if (fb == NULL)
+        {
+            vTaskDelay(100);
+            ESP_LOGI(TAG, "Get image failed!");
+        }
+        else
+        {
+            if (pdTRUE == xSemaphoreTake(xGuiSemaphore, portMAX_DELAY))
+            {
+                img_dsc.data = fb->buf;
+                lv_img_set_src(img_cam, &img_dsc);
+                int64_t fr_end = esp_timer_get_time();
+                int64_t frame_time = fr_end - last_frame;
+                last_frame = fr_end;
+                frame_time /= 1000;
+                ESP_LOGI("esp", "display:  %ums (%.1ffps)", (uint32_t)frame_time, 1000.0 / (uint32_t)frame_time);
+                xSemaphoreGive(xGuiSemaphore);
+            }
+            esp_camera_fb_return(fb);
+            fb = NULL;
+        }
+    }
 }
